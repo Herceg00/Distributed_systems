@@ -7,25 +7,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "mpi/mpi.h"
+#include <unistd.h>
 
 #define eps 0.01
 using namespace std;
 
-double normal_dis_gen() //generate a value
-{
-    double S = 0.;
-    for (int i = 0; i < 12; ++i) { S += (double) rand() / RAND_MAX; }
-    return S - 6.0;
-}
 
 typedef complex<double> complexd;
 
-void make_noise(complexd U[2][2], complexd V[2][2], double thetta) {
-    V[0][0] = U[0][0] * cos(thetta) - U[0][1] * sin(thetta);
-    V[0][1] = U[0][0] * sin(thetta) + U[0][1] * cos(thetta);
-    V[1][0] = U[1][0] * cos(thetta) - U[1][1] * sin(thetta);
-    V[1][1] = U[1][0] * sin(thetta) + U[1][1] * cos(thetta);
-}
 
 complexd *read(char *f, unsigned int *n, int rank, int size) {
     MPI_File file;
@@ -37,7 +26,7 @@ complexd *read(char *f, unsigned int *n, int rank, int size) {
     }
     if (!rank)
         MPI_File_read(file, n, 1, MPI_INT, MPI_STATUS_IGNORE);
-    MPI_Bcast(n, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(n, 1, MPI_INT, 0, MPI_COMM_WORLD); //Рассылаем степень
     unsigned long long index = 1LLU << *n;
     cout << size << *n << endl;
     unsigned seg_size = index / size;
@@ -53,31 +42,6 @@ complexd *read(char *f, unsigned int *n, int rank, int size) {
     }
     MPI_File_close(&file);
     return A;
-}
-
-
-void write(char *f, complexd *B, int n, int rank, int size) {
-    MPI_File file;
-    if (MPI_File_open(MPI_COMM_WORLD, f, MPI_MODE_CREATE | MPI_MODE_WRONLY,
-                      MPI_INFO_NULL, &file)) {
-        if (!rank)
-            printf("Error opening file %s\n", f);
-        MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
-    }
-    if (rank == 0) {
-        MPI_File_write(file, &n, 1, MPI_INT, MPI_STATUS_IGNORE);
-
-    }
-    unsigned long long index = 1LLU << n;
-    unsigned seg_size = index / size;
-    double d[2];
-    MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank * sizeof(double), MPI_SEEK_SET);
-    for (std::size_t i = 0; i < seg_size; ++i) {
-        d[0] = B[i].real();
-        d[1] = B[i].imag();
-        MPI_File_write(file, &d, 2, MPI_DOUBLE, MPI_STATUS_IGNORE);
-    }
-    MPI_File_close(&file);
 }
 
 complexd *generate_condition(unsigned long long seg_size, int rank) {
@@ -98,6 +62,8 @@ complexd *generate_condition(unsigned long long seg_size, int rank) {
         module = sqrt(module);
     }
     MPI_Bcast(&module, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
+
 #pragma omp parallel shared(A, module)
     {
 #pragma omp for schedule(static)
@@ -107,13 +73,18 @@ complexd *generate_condition(unsigned long long seg_size, int rank) {
     return A;
 }
 
+
+void check_situation(bool* robustness, bool& extra_load, bool send_ack){
+    MPI_Allgather(send_ack, 1,MPI_C_BOOL, robustness, 1, MPI_C_BOOL, MPI_COMM_WORLD);
+}
+
 void
 OneQubitEvolution(complexd *buf_zone, complexd U[2][2], unsigned int n, unsigned int k, complexd *recv_zone, int rank,
-                  int size) {
+                  int size, bool* robustness) {
     unsigned N = 1u << n;
     unsigned seg_size = N / size;
     unsigned first_index = rank * seg_size;
-    unsigned rank_change = first_index ^(1u << (k - 1));
+    unsigned int rank_change = first_index ^(1u << (k - 1));
     rank_change /= seg_size;
 
     if (rank != rank_change) {
@@ -153,43 +124,12 @@ OneQubitEvolution(complexd *buf_zone, complexd U[2][2], unsigned int n, unsigned
     }
 }
 
-std::size_t difference(complexd *ideal, complexd *count, unsigned long long seg_size, int rank) {
-    std::size_t error_position = 0;
-#pragma omp parallel shared(ideal, count, error_position)
-    {
-#pragma omp for schedule(static)
-        for (std::size_t i = 0; i < seg_size; i++) {
-            if (ideal[i] != count[i]) {
-                error_position = i + seg_size * rank;
-            }
-        }
-    }
-    return error_position; //Last error position will be fixed
-}
 
-double get_distance(complexd *ideal, complexd *noise, int rank, unsigned long long seg_size) {
-    double sqr = 0;
-    double module;
-#pragma omp parallel shared(ideal, noise) reduction(+: sqr)
-    {
-#pragma omp for schedule(static)
-        for (std::size_t i = 0; i < seg_size; i++) {
-            sqr += abs(ideal[i] * conj(noise[i])) * abs(ideal[i] * conj(noise[i]));
-        }
-    }
-    MPI_Reduce(&sqr, &module, 1, MPI_DOUBLE_COMPLEX, MPI_SUM, 0, MPI_COMM_WORLD);
-    if (rank == 0) {
-        return module;
-    } else {
-        return 0;
-    }
-}
 
 
 int main(int argc, char **argv) {
     bool file_read = false;
-    bool test_flag = false;
-    char *input, *output, *test_file;
+    char *input;
     unsigned k, n;
     for (int i = 1; i < argc; i++) {
         string option(argv[i]);
@@ -206,15 +146,6 @@ int main(int argc, char **argv) {
             input = argv[++i];
             file_read = true;
         }
-        if ((option.compare("file_write") == 0)) {
-            output = argv[++i];
-        }
-        if ((option.compare("test") == 0)) {
-            test_flag = true;
-        }
-        if ((option.compare("file_test") == 0)) {
-            test_file = argv[++i];
-        }
     }
 
     MPI_Init(&argc, &argv);
@@ -222,14 +153,33 @@ int main(int argc, char **argv) {
     int size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+void check_situation(bool* robustness, bool& extra_load, bool send_ack){
+    MPI_Allgather(send_ack, 1,MPI_C_BOOL, robustness, 1, MPI_C_BOOL, MPI_COMM_WORLD);
+}
+
+    /*Failure control parameters
+     * robustness - monitoring processes with no response
+     * extra_load - if we should do extra task due to a neighbour failure
+     * send_ack - always true, send a proof that a process is alive*/
+    bool robustness[size];
+    bool extra_load = false;
+    bool send_ack = true;
+
+    sleep(20);
+
     unsigned long long index = 1LLU << n;
     unsigned long long seg_size = index / size;
     complexd *V;
+
+    //control point
+
     if (!file_read) {
         V = generate_condition(seg_size, rank);
     } else {
         V = read(input, &n, rank, size);
     }
+
+    //control point
 
     complexd U[2][2];
     U[0][0] = 1 / sqrt(2);
@@ -245,44 +195,11 @@ int main(int argc, char **argv) {
 
     //simple evolution
     for (int qubit = 1; qubit < n + 1; qubit++) {
-        OneQubitEvolution(V, U, n, k, recv_buf1, rank, size);
+        OneQubitEvolution(V, U, n, k, recv_buf1, rank, size, robustness);
     }
     double end = MPI_Wtime();
 
     std::cout << "Clear evolution took " << end - begin << " seconds to run." << std::endl;
-
-    double time_to_noise_evolution = 0;
-
-    //noise evolution
-    for (int qubit = 1; qubit < n + 1; qubit++) {
-        complexd U_noised[2][2];
-        double thetta = 0;
-        if (rank == 0) {
-            thetta = normal_dis_gen();
-        }
-        MPI_Bcast(&thetta, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-        make_noise(U, U_noised, thetta);
-        begin = MPI_Wtime();
-        OneQubitEvolution(V, U_noised, n, k, recv_buf2, rank, size);
-        end = MPI_Wtime();
-        time_to_noise_evolution += end - begin;
-    }
-
-    std::cout << "Noise evolution took  " << time_to_noise_evolution << " seconds to run." << std::endl;
-
-    if (test_flag) {
-        complexd *test_vector = read(test_file, &n, rank, size);
-        if (std::size_t pos = difference(test_vector, V, seg_size, rank) == 0) {
-            cout << "Correct for rank " << rank;
-        } else {
-            cout << "Error in " << pos << " position on segment number " << rank;
-        }
-    } else {
-        double distance = get_distance(recv_buf1, recv_buf2, rank, seg_size);
-        if (!rank) {                                                  //only root has non-NULL value
-            cout << "distance is equal " << distance << endl;
-        }
-    }
 
     MPI_Finalize();
     delete[] V;
