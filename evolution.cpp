@@ -74,8 +74,13 @@ complexd *generate_condition(unsigned long long seg_size, int rank) {
 }
 
 
-void check_situation(bool* robustness, bool& extra_load, bool send_ack){
-    MPI_Allgather(send_ack, 1,MPI_C_BOOL, robustness, 1, MPI_C_BOOL, MPI_COMM_WORLD);
+void check_situation(bool* robustness, bool* extra_load, bool* send_ack, int rank, int size, unsigned rank_change) {
+    MPI_Allgather(send_ack, 1, MPI_INT, robustness, 1, MPI_INT, MPI_COMM_WORLD);
+    for (int j = 0; j < size; j++) {
+        if (!robustness[j] and j == rank_change) {
+            *extra_load = true;
+        }
+    }
 }
 
 void
@@ -153,9 +158,6 @@ int main(int argc, char **argv) {
     int size;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
-void check_situation(bool* robustness, bool& extra_load, bool send_ack){
-    MPI_Allgather(send_ack, 1,MPI_C_BOOL, robustness, 1, MPI_C_BOOL, MPI_COMM_WORLD);
-}
 
     /*Failure control parameters
      * robustness - monitoring processes with no response
@@ -163,12 +165,16 @@ void check_situation(bool* robustness, bool& extra_load, bool send_ack){
      * send_ack - always true, send a proof that a process is alive*/
     bool robustness[size];
     bool extra_load = false;
-    bool send_ack = true;
-
-    sleep(20);
+    bool send_ack[1] = {true};
 
     unsigned long long index = 1LLU << n;
     unsigned long long seg_size = index / size;
+    unsigned first_index = rank * seg_size;
+    unsigned rank_change = first_index ^(1u << (k - 1));
+    rank_change /= seg_size;
+
+    check_situation(robustness, &extra_load, send_ack, rank, size, rank_change);
+
     complexd *V;
 
     //control point
