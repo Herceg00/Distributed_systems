@@ -12,9 +12,7 @@
 #define eps 0.01
 using namespace std;
 
-
 typedef complex<double> complexd;
-
 
 complexd *read(char *f, unsigned int *n, int rank, int size) {
     MPI_File file;
@@ -85,17 +83,21 @@ void check_situation(bool* robustness, bool* extra_load, bool* send_ack, int ran
 
 void
 OneQubitEvolution(complexd *buf_zone, complexd U[2][2], unsigned int n, unsigned int k, complexd *recv_zone, int rank,
-                  int size, bool* robustness) {
+                  int size, bool extra_load) {
     unsigned N = 1u << n;
     unsigned seg_size = N / size;
     unsigned first_index = rank * seg_size;
     unsigned int rank_change = first_index ^(1u << (k - 1));
     rank_change /= seg_size;
 
+
     if (rank != rank_change) {
-        MPI_Sendrecv(buf_zone, seg_size, MPI_DOUBLE_COMPLEX, rank_change, 0, recv_zone, seg_size, MPI_DOUBLE_COMPLEX,
-                     rank_change, 0,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        if (!extra_load) {
+            MPI_Sendrecv(buf_zone, seg_size, MPI_DOUBLE_COMPLEX, rank_change, 0, recv_zone, seg_size,
+                         MPI_DOUBLE_COMPLEX,
+                         rank_change, 0,
+                         MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
         if (rank > rank_change) { //Got data somewhere from left
 #pragma omp parallel shared(recv_zone, buf_zone, U)
             {
@@ -128,9 +130,6 @@ OneQubitEvolution(complexd *buf_zone, complexd U[2][2], unsigned int n, unsigned
         }
     }
 }
-
-
-
 
 int main(int argc, char **argv) {
     bool file_read = false;
@@ -173,6 +172,7 @@ int main(int argc, char **argv) {
     unsigned rank_change = first_index ^(1u << (k - 1));
     rank_change /= seg_size;
 
+    /* This control point needs nothing to be done, as there are no computations or reading files yet */
     check_situation(robustness, &extra_load, send_ack, rank, size, rank_change);
 
     complexd *V;
@@ -185,7 +185,27 @@ int main(int argc, char **argv) {
         V = read(input, &n, rank, size);
     }
 
-    //control point
+    auto *recv_buf = new complexd[seg_size]; //buffer to receive a message from neighbour
+
+    check_situation(robustness, &extra_load, send_ack, rank, size, rank_change);
+    if (extra_load) {
+        MPI_File file;
+        if (MPI_File_open(MPI_COMM_WORLD, input, MPI_MODE_RDONLY, MPI_INFO_NULL,
+                          &file)) {
+            if (!rank)
+                printf("Error opening file %s\n", input);
+            MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+        }
+        MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank * sizeof(double),
+                      MPI_SEEK_SET);
+        double d[2];
+        recv_buf = new complexd[seg_size];
+        for (std::size_t i = 0; i < seg_size; ++i) {
+            MPI_File_read(file, &d, 2, MPI_DOUBLE, MPI_STATUS_IGNORE);
+            recv_buf[i].real(d[0]);
+            recv_buf[i].imag(d[1]);
+        }
+    }
 
     complexd U[2][2];
     U[0][0] = 1 / sqrt(2);
@@ -193,16 +213,34 @@ int main(int argc, char **argv) {
     U[1][0] = 1 / sqrt(2);
     U[1][1] = -1 / sqrt(2);
 
-
-    auto *recv_buf1 = new complexd[seg_size];
-    auto *recv_buf2 = new complexd[seg_size];
-
     double begin = MPI_Wtime();
+    OneQubitEvolution(V, U, n, k, recv_buf, rank, size, extra_load);
 
-    //simple evolution
-    for (int qubit = 1; qubit < n + 1; qubit++) {
-        OneQubitEvolution(V, U, n, k, recv_buf1, rank, size, robustness);
+    //check if Evolution needs to be redone
+    check_situation(robustness, &extra_load, send_ack, rank, size, rank_change);
+    if (extra_load) {
+        MPI_File file;
+        if (MPI_File_open(MPI_COMM_WORLD, input, MPI_MODE_RDONLY, MPI_INFO_NULL,
+                          &file)) {
+            if (!rank)
+                printf("Error opening file %s\n", input);
+            MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+        }
+        MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank * sizeof(double),
+                      MPI_SEEK_SET);
+        double d[2];
+        recv_buf = new complexd[seg_size];
+        for (std::size_t i = 0; i < seg_size; ++i) {
+            MPI_File_read(file, &d, 2, MPI_DOUBLE, MPI_STATUS_IGNORE);
+            recv_buf[i].real(d[0]);
+            recv_buf[i].imag(d[1]);
+        }
     }
+
+    if (extra_load) {
+        OneQubitEvolution(V, U, n, k, recv_buf, rank, size, extra_load);
+    }
+
     double end = MPI_Wtime();
 
     std::cout << "Clear evolution took " << end - begin << " seconds to run." << std::endl;
