@@ -81,24 +81,64 @@ void check_situation(bool* robustness, bool* extra_load, bool* send_ack, int ran
     }
 }
 
+void check_situation_improved(bool* robustness, bool* extra_load, bool* send_ack, int rank, int size, unsigned rank_change) {
+    MPI_Allgather(send_ack, 1, MPI_INT, robustness, 1, MPI_INT, MPI_COMM_WORLD);
+    for (int j = 0; j < size; j++) {
+        if (!robustness[j] and j == (rank + 1) % size and rank_change == rank) {
+            *extra_load = true;
+        }
+    }
+}
+
 void
 OneQubitEvolution(complexd *buf_zone, complexd U[2][2], unsigned int n, unsigned int k, complexd *recv_zone, int rank,
-                  int size, bool extra_load) {
+                  int size, bool* extra_load) {
     unsigned N = 1u << n;
     unsigned seg_size = N / size;
     unsigned first_index = rank * seg_size;
     unsigned int rank_change = first_index ^(1u << (k - 1));
     rank_change /= seg_size;
 
-
-    if (rank != rank_change) {
-        if (!extra_load) {
+    if (!*extra_load) {
+        if (rank != rank_change) {
             MPI_Sendrecv(buf_zone, seg_size, MPI_DOUBLE_COMPLEX, rank_change, 0, recv_zone, seg_size,
                          MPI_DOUBLE_COMPLEX,
                          rank_change, 0,
                          MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (rank > rank_change) { //Got data somewhere from left
+#pragma omp parallel shared(recv_zone, buf_zone, U)
+                {
+#pragma omp for schedule(static)
+                    for (int i = 0; i < seg_size; i++) {
+                        recv_zone[i] = U[1][0] * recv_zone[i] + U[1][1] * buf_zone[i];
+                    }
+                }
+            } else {
+#pragma omp parallel shared(recv_zone, buf_zone, U)
+                {
+#pragma omp for schedule(static)
+                    for (int i = 0; i < seg_size; i++) {
+                        recv_zone[i] = U[0][0] * buf_zone[i] + U[0][1] * recv_zone[i];
+                    }
+                }
+            }
+        } else {
+            unsigned shift = (int) log2(seg_size) - k;
+            unsigned pow = 1u << (shift);
+#pragma omp parallel shared(recv_zone, buf_zone, U)
+            {
+#pragma omp for schedule(static)
+                for (std::size_t i = 0; i < seg_size; i++) {
+                    unsigned i0 = i & ~pow;
+                    unsigned i1 = i | pow;
+                    unsigned iq = (i & pow) >> shift;
+                    recv_zone[i] = U[iq][0] * buf_zone[i0] + U[iq][1] * buf_zone[i1];
+                }
+            }
         }
-        if (rank > rank_change) { //Got data somewhere from left
+        *extra_load = false;
+    } else {
+        if (rank != rank_change) { // do "double" task
 #pragma omp parallel shared(recv_zone, buf_zone, U)
             {
 #pragma omp for schedule(static)
@@ -106,29 +146,31 @@ OneQubitEvolution(complexd *buf_zone, complexd U[2][2], unsigned int n, unsigned
                     recv_zone[i] = U[1][0] * recv_zone[i] + U[1][1] * buf_zone[i];
                 }
             }
-        } else {
+
 #pragma omp parallel shared(recv_zone, buf_zone, U)
             {
 #pragma omp for schedule(static)
                 for (int i = 0; i < seg_size; i++) {
-                    recv_zone[i] = U[0][0] * buf_zone[i] + U[0][1] * recv_zone[i];
+                    buf_zone[i] = U[0][0] * buf_zone[i] + U[0][1] * recv_zone[i];
+                }
+            }
+        } else {
+            unsigned shift = (int) log2(seg_size) - k;
+            unsigned pow = 1u << (shift);
+#pragma omp parallel shared(recv_zone, buf_zone, U)
+            {
+#pragma omp for schedule(static)
+                for (std::size_t i = 0; i < seg_size; i++) {
+                    unsigned i0 = i & ~pow;
+                    unsigned i1 = i | pow;
+                    unsigned iq = (i & pow) >> shift;
+                    recv_zone[i] = U[iq][0] * buf_zone[i0] + U[iq][1] * buf_zone[i1];
                 }
             }
         }
-    } else {
-        unsigned shift = (int) log2(seg_size) - k;
-        unsigned pow = 1u << (shift);
-#pragma omp parallel shared(recv_zone, buf_zone, U)
-        {
-#pragma omp for schedule(static)
-            for (std::size_t i = 0; i < seg_size; i++) {
-                unsigned i0 = i & ~pow;
-                unsigned i1 = i | pow;
-                unsigned iq = (i & pow) >> shift;
-                recv_zone[i] = U[iq][0] * buf_zone[i0] + U[iq][1] * buf_zone[i1];
-            }
-        }
+        *extra_load = false;
     }
+
 }
 
 int main(int argc, char **argv) {
@@ -196,7 +238,7 @@ int main(int argc, char **argv) {
                 printf("Error opening file %s\n", input);
             MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
         }
-        MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank * sizeof(double),
+        MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank_change * sizeof(double),
                       MPI_SEEK_SET);
         double d[2];
         recv_buf = new complexd[seg_size];
@@ -214,10 +256,12 @@ int main(int argc, char **argv) {
     U[1][1] = -1 / sqrt(2);
 
     double begin = MPI_Wtime();
-    OneQubitEvolution(V, U, n, k, recv_buf, rank, size, extra_load);
+    OneQubitEvolution(V, U, n, k, recv_buf, rank, size, &extra_load);
 
-    //check if Evolution needs to be redone
+    //check if Evolution needs to be redone - neigbour has fallen
+    MPI_Barrier(MPI_COMM_WORLD);
     check_situation(robustness, &extra_load, send_ack, rank, size, rank_change);
+
     if (extra_load) {
         MPI_File file;
         if (MPI_File_open(MPI_COMM_WORLD, input, MPI_MODE_RDONLY, MPI_INFO_NULL,
@@ -226,19 +270,37 @@ int main(int argc, char **argv) {
                 printf("Error opening file %s\n", input);
             MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
         }
-        MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank * sizeof(double),
+        MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank_change * sizeof(double),
                       MPI_SEEK_SET);
         double d[2];
-        recv_buf = new complexd[seg_size];
         for (std::size_t i = 0; i < seg_size; ++i) {
             MPI_File_read(file, &d, 2, MPI_DOUBLE, MPI_STATUS_IGNORE);
             recv_buf[i].real(d[0]);
             recv_buf[i].imag(d[1]);
         }
+        OneQubitEvolution(V, U, n, k, recv_buf, rank, size, &extra_load);
     }
 
+
+    check_situation_improved(robustness, &extra_load, send_ack, rank, size, rank_change);
+
     if (extra_load) {
-        OneQubitEvolution(V, U, n, k, recv_buf, rank, size, extra_load);
+        MPI_File file;
+        if (MPI_File_open(MPI_COMM_WORLD, input, MPI_MODE_RDONLY, MPI_INFO_NULL,
+                          &file)) {
+            if (!rank)
+                printf("Error opening file %s\n", input);
+            MPI_Abort(MPI_COMM_WORLD, MPI_ERR_OTHER);
+        }
+        MPI_File_seek(file, sizeof(int) + 2 * seg_size * rank_change * sizeof(double),
+                      MPI_SEEK_SET);
+        double d[2];
+        for (std::size_t i = 0; i < seg_size; ++i) {
+            MPI_File_read(file, &d, 2, MPI_DOUBLE, MPI_STATUS_IGNORE);
+            recv_buf[i].real(d[0]);
+            recv_buf[i].imag(d[1]);
+        }
+        OneQubitEvolution(V, U, n, k, recv_buf, (rank+1)%size, size, &extra_load);
     }
 
     double end = MPI_Wtime();

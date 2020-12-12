@@ -38,8 +38,7 @@ int main(int argc, char** argv) {
 
         for (int i = 1; i < 16; i++) {
             for (int j = 0; j < i; j++) {
-//                storage[displaces[i] + j] = std::rand() % 100;
-                storage[displaces[i] + j] = i;
+                storage[displaces[i] + j] = std::rand() % 100;
             }
         }
 
