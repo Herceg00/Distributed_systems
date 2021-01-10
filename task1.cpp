@@ -1,6 +1,5 @@
 #include <iostream>
 #include "mpich/mpi.h"
-#include <vector>
 #include <utility>
 #include <array>
 
@@ -50,6 +49,22 @@ int main(int argc, char** argv) {
                                                    std::pair<int, int>(13,10),
                                                    std::pair<int, int>(14,11)};
 
+    std::array<std::pair<int, int>, 15> adressers = {std::pair<int, int>(1,4),
+                                                     std::pair<int, int>(2,5),
+                                                     std::pair<int, int>(3,6),
+                                                     std::pair<int, int>(-1,7),
+                                                     std::pair<int, int>(5,8),
+                                                     std::pair<int, int>(6,9),
+                                                     std::pair<int, int>(7,10),
+                                                     std::pair<int, int>(-1,11),
+                                                     std::pair<int, int>(9,12),
+                                                     std::pair<int, int>(10,13),
+                                                     std::pair<int, int>(11,14),
+                                                     std::pair<int, int>(-1,15),
+                                                     std::pair<int, int>(13,-1),
+                                                     std::pair<int, int>(14,-1),
+                                                     std::pair<int, int>(15,-1)};
+
 
 
 
@@ -82,18 +97,42 @@ int main(int argc, char** argv) {
     //STEP 2
 
     if (rank == 1 or rank == 4) { //do parallel send
-        MPI_Send(buffer, total_size, MPI_INT, 1, 0, TRANSPUTER_MATRIX);
-        MPI_Send(buffer, total_size, MPI_INT, 4, 0, TRANSPUTER_MATRIX);
-    }
-    if (rank == 2 or rank == 8) {
-        MPI_Recv(buffer,buffer_size, MPI_INT, 0, MPI_ANY_TAG,TRANSPUTER_MATRIX, nullptr);
+        if (adressers[rank].first != -1) {
+            MPI_Send(buffer, total_size, MPI_INT, adressers[rank].first, 0, TRANSPUTER_MATRIX);
+        }
+        if (adressers[rank].second != -1) {
+            MPI_Send(buffer, total_size, MPI_INT, adressers[rank].second, 0, TRANSPUTER_MATRIX);
+        }
     }
 
-    if (rank == 5) {
-        MPI_Recv(buffer,buffer_size, MPI_INT, 0, MPI_ANY_TAG,TRANSPUTER_MATRIX, nullptr);
+    if (rank == 5 or rank == 2 or rank == 8) {
+        if (providers[rank].first != -1) {
+            MPI_Recv(buffer, buffer_size/2 , MPI_INT, providers[rank].first, MPI_ANY_TAG, TRANSPUTER_MATRIX, nullptr);
+        }
+        if (providers[rank].second != -1) {
+            MPI_Recv(buffer + buffer_size / 2, buffer_size + 1  / 2, MPI_INT, providers[rank].second, MPI_ANY_TAG,TRANSPUTER_MATRIX, nullptr);
+        }
     }
 
     //STEP 3
+
+    if (rank == 1 or rank == 4) { //do parallel send
+        if (adressers[rank].first != -1) {
+            MPI_Send(buffer, total_size, MPI_INT, adressers[rank].first, 0, TRANSPUTER_MATRIX);
+        }
+        if (adressers[rank].second != -1) {
+            MPI_Send(buffer, total_size, MPI_INT, adressers[rank].second, 0, TRANSPUTER_MATRIX);
+        }
+    }
+
+    if (rank == 5 or rank == 2 or rank == 8) {
+        if (providers[rank].first != -1) {
+            MPI_Recv(buffer, buffer_size/2 , MPI_INT, providers[rank].first, MPI_ANY_TAG, TRANSPUTER_MATRIX, nullptr);
+        }
+        if (providers[rank].second != -1) {
+            MPI_Recv(buffer + buffer_size / 2, buffer_size + 1  / 2, MPI_INT, providers[rank].second, MPI_ANY_TAG,TRANSPUTER_MATRIX, nullptr);
+        }
+    }
 
     //STEP 4
 
