@@ -125,7 +125,6 @@ int main(int argc, char** argv) {
     int *buffer = new int[buffer_size];
 
     MPI_Barrier(TRANSPUTER_MATRIX);
-
     //STEPS
 
     for (auto it = active_proc.begin(); it!= active_proc.end(); ++it) {
