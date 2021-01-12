@@ -182,7 +182,7 @@ int main(int argc, char **argv) {
     MPI_Init(&argc, &argv);
     int rank;
     int size;
-
+    int some_value = rank;
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
@@ -217,6 +217,14 @@ int main(int argc, char **argv) {
     double begin = MPI_Wtime();
 
     OneQubitEvolution(V, U, n, k, recv_buf, rank, size, input);
+
+    MPI_Sendrecv(&some_value, 1, MPI_INT, rank_change, 0, &some_value, 1, MPI_INT, rank_change, MPI_ANY_TAG, MPI_COMM_WORLD,
+                 nullptr);
+
+    if(requires_extra_work) {
+        OneQubitEvolution(V, U, n, k, recv_buf, rank, size, input);
+    }
+
     double end = MPI_Wtime();
     std::cout << "The process took " << end - begin << " seconds to run." << std::endl;
 
